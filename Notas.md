@@ -238,7 +238,7 @@ Ejecutamos el siguiente comando, para validar que funcione correctamente
 
 Una vez finalizada la ejecución, verificamos el resultado accediendo al directorio donde se guardaron los archivos Parquet. En este caso, realizamos la validación desde **`spark-shell`:**
 
-| { val df \= spark.read.parquet("F:/Trabajo/Mercadolibre/Examen/output\_parquet") df.printSchema() df.show(false) } |
+| { val df \= spark.read.parquet("F:/Trabajo/Mercadolibre/Examen/output\_parquet") df.printSchema() df.show(Int.MaxValue, false) } |
 | :---- |
 
 #### Resultado: 
@@ -270,7 +270,58 @@ Para mantener una separación clara entre la ejecución local y en la nube, se c
 
 La ejecución del script adaptado para GCS se realiza con el siguiente comando, incluyendo las configuraciones necesarias para autenticación y acceso al bucket:
 
-| spark-submit \--jars file:///F:/Trabajo/Mercadolibre/Examen/lib/gcs-connector-hadoop3-latest.jar \--conf spark.hadoop.fs.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem \--conf spark.hadoop.fs.AbstractFileSystem.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS \--conf spark.hadoop.google.cloud.auth.service.account.enable=true \--conf spark.hadoop.google.cloud.auth.service.account.json.keyfile=F:/Trabajo/Mercadolibre/Examen/mercadolibre-key.json \--class PurchaseDataProcessorGC \--master local target/scala-2.12/mercado-libre-challenge\_2.12-0.1.jar |
+| spark-submit \--jars file:///F:/Trabajo/Mercadolibre/Examen/lib/gcs-connector-hadoop3-latest.jar \--conf spark.hadoop.fs.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem \--conf spark.hadoop.fs.AbstractFileSystem.gs.impl=com.google.cloud.hadoop.fs.gcs.GoogleHadoopFS \--conf spark.hadoop.google.cloud.auth.service.account.enable=true \--conf spark.hadoop.google.cloud.auth.service.account.json.keyfile=F:/Trabajo/Mercadolibre/mercadolibre-key.json \--class PurchaseDataProcessorGC \--master local target/scala-2.12/mercado-libre-challenge\_2.12-0.1.jar |
 | :---- |
 
 Finalmente, se validó nuevamente el contenido de salida descargando los archivos desde GCS o volviendo a leerlos desde Spark. Alternativamente, esta validación puede realizarse directamente conectándose a Google Cloud.
+
+# Part2: Data-Driven Testing
+
+## Resumen
+
+Luego de implementar correctamente el procesamiento de datos en la Parte 1, se creó un nuevo .scala, para la organización y uso de función, luego pasé a diseñar una batería de pruebas unitarias para validar la lógica implementada. Para ello, utilicé el framework ScalaTest, ya que permite realizar pruebas de manera expresiva, clara y mantenible.  
+El objetivo fue cubrir tanto casos positivos (inputs válidos), como también escenarios negativos (datos faltantes o mal formateados) y casos límite (como archivos vacíos), tal como se requería.
+
+## Creación de funciones
+
+Creamos un nuevo.scala, en la ruta “F:\\Trabajo\\Mercadolibre\\Examen\\MercadoLibreChallange\\src\\main\\scala” y lo nombramos “PurchaseDataProcessorUtils.scala”  
+Esto lo realizamos, para luego utilizar las funciones por separado y quede de esta manera más ordenado y luego nos permite importar dichas funciones en otras ejecuciones
+
+| package com.mercadolibre.challenge import org.apache.spark.sql.{DataFrame, SparkSession} import org.apache.spark.sql.functions.\_ object PurchaseDataProcessorUtils {   def cleanNulls(df: DataFrame): DataFrame \= {     df.filter(col("user\_id").isNotNull && col("email").isNotNull && col("purchase\_datetime").isNotNull)   }   def cleanDatetime(df: DataFrame): DataFrame \= {     df.withColumn("purchase\_datetime\_clean",       regexp\_replace(         regexp\_replace(           regexp\_replace(col("purchase\_datetime"), "\[^\\\\x00-\\\\x7F\]", ""),           "\\\\.", ""),         "(?i)am", "AM")     ).withColumn("purchase\_datetime\_clean",       regexp\_replace(col("purchase\_datetime\_clean"), "(?i)pm", "PM"))   }   def parseDatetime(df: DataFrame): DataFrame \= {     df.withColumn("purchase\_datetime\_parsed",       to\_timestamp(col("purchase\_datetime\_clean"), "MM/dd/yyyy hh:mm:ss a")     ).withColumn("purchase\_date",       date\_format(col("purchase\_datetime\_parsed"), "yyyy-MM-dd")     )   }   def filterDateRange(df: DataFrame): DataFrame \= {     df.filter(col("purchase\_date").between("2023-01-01", "2023-12-31"))   }   def aggregateByUser(df: DataFrame): DataFrame \= {     df.groupBy("user\_id").agg(sum("purchase\_amount").alias("total\_purchase\_amount"))   } }  |
+| :---- |
+
+### 
+
+## Pruebas Unitarias
+
+1. **Preparé un entorno de pruebas independiente con Spark en modo local**, lo que me permitió testear los métodos **cleanNulls, cleanDatetime, parseDatetime, filterDateRange y aggregateByUser** en distintos escenarios controlados.
+
+2. **Diseñé y ejecuté casos de prueba para inputs válidos**, verificando que los resultados obtenidos fueran los esperados al aplicar todo el pipeline de transformación sobre datos bien formateados.
+
+3. **Incorporé pruebas para inputs inválidos**, incluyendo:
+
+   * Registros con **null** en campos críticos.
+
+   * Fechas mal formateadas que no deberían poder ser parseadas.
+
+   * Validé que dichos registros fueran correctamente filtrados o ignorados.
+
+4. **Incluí un caso borde** simulando un archivo vacío (dataset sin registros) para asegurarme de que el sistema lo manejara sin errores ni excepciones inesperadas.
+
+5. Cada test utiliza datasets pequeños construidos en memoria con datos de ejemplo utilizando **Seq(...) y toDF(),** lo cual me permitió tener un control total de las condiciones y los resultados esperados.
+
+###  
+
+### **Ejemplo destacado de prueba**
+
+En particular, me surgió una duda en una de las pruebas que desarrollé, específicamente en esta:
+
+| `test("testInvalidDateFormatIsIgnored") {   val data = Seq(     Purchase(1, "user1", "email1@gmail.com", "2023/01/01 10:00:00", 100.0), // mal formato     Purchase(2, "user2", "email2@gmail.com", "01/01/2023 10:00:00 AM", 200.0) // correcto   )   ...   assert(result.length == 1)   assert(result.head.getInt(0) == 2) }` |
+| :---- |
+
+Me cuestioné si debía o no notificar explícitamente que hay un registro con fecha inválida. Por ahora, opté por que el test simplemente valide que ese registro no pase el filtro. Esto es coherente con la lógica del procesamiento, que filtra silenciosamente los datos mal formateados, sin necesidad de lanzar una excepción
+
+### Organización del código
+
+Los tests se encuentran en el mismo repositorio junto al script principal, en la ruta **src/test/scala/**, lo cual permite que sean ejecutados fácilmente mediante **sbt test**.
+
